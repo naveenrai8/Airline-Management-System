@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ | Project-local Maven settings for Flight-API.
+ |
+ | Purpose: point THIS project at PUBLIC Maven Central instead of the global
+ | Salesforce Nexus mirror configured in ~/.m2/settings.xml. Scoped to this
+ | project only - the global settings file is left untouched.
+ |
+ | Used via `-s` (see .mvn/maven.config for the CLI/wrapper, and set IntelliJ's
+ | "User settings file" to this path for IDE builds).
+ |
+ | No <servers> block: Maven Central is anonymous, so no credentials are needed
+ | (and none of the corporate Nexus tokens are duplicated here).
+ |
+ | The default local repository (~/.m2/repository) is reused, so anything
+ | already downloaded is not re-fetched.
+ |-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <profiles>
+    <!-- Preserved from the global settings: needed on Apple Silicon so that
+         artifacts resolved via the os-maven-plugin classifier work. -->
+    <profile>
+      <id>apple-silicon</id>
+      <properties>
+        <os.detected.classifier>osx-x86_64</os.detected.classifier>
+      </properties>
+    </profile>
+
+    <!-- Point the "central" repo id at PUBLIC Maven Central. Declaring it here
+         overrides the sfdc/Nexus "central" from the global file (which is not
+         loaded when this settings file is used via -s). -->
+    <profile>
+      <id>maven-central</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <name>Maven Central</name>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <name>Maven Central</name>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
+
+  <activeProfiles>
+    <activeProfile>maven-central</activeProfile>
+    <activeProfile>apple-silicon</activeProfile>
+  </activeProfiles>
+
+</settings>
