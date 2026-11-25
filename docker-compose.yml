@@ -1,0 +1,189 @@
+name: ams
+
+services:
+  # Single Redis instance with Redis Stack (includes RediSearch, RedisJSON, RedisTimeSeries, RedisBloom)
+  redis:
+    image: redis/redis-stack:latest
+    container_name: redis
+    ports:
+      - "56379:6379"    # Redis server
+      - "58001:8001"    # Redis Insight (GUI)
+    volumes:
+      - redis-data:/data
+    environment:
+      - REDIS_ARGS=--requirepass redis123 --maxmemory 256mb --maxmemory-policy allkeys-lfu
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: ams-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: learner
+      POSTGRES_PASSWORD: learner_pass
+      POSTGRES_DB: flightdb
+    ports:
+      - "55432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql
+      - ./init:/docker-entrypoint-initdb.d
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "log_min_duration_statement=100"
+    shm_size: "256mb"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U flight -d flightdb" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
+    ports:
+      - "55102:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@flight.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"   # single-user, skip login friction for local dev
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Separate PG instance for FDW / replication exercises
+  postgres_replica:
+    image: pgvector/pgvector:pg18
+    container_name: postgres_replica
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: learner
+      POSTGRES_PASSWORD: learner_pass
+      POSTGRES_DB: pg_learning
+    ports:
+      - "55433:5432"
+    volumes:
+      - pg_replica_data:/var/lib/postgresql
+    shm_size: "128mb"
+
+  # PgBouncer for connection pooling exercises
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: pg18_pgbouncer
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://learner:learner_pass@postgres:5432/postgres"
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+      MIN_POOL_SIZE: 5
+    ports:
+      - "56432:5432"
+    depends_on:
+      - postgres
+
+  rabbitmq:
+    image: rabbitmq:4.3-management
+    hostname: rmq-single            # node name becomes rabbit@rmq-single; keep it stable or data dir changes
+    ports:
+      - "${RMQ_AMQP_PORT:-5672}:5672"     # AMQP 0-9-1 / 1.0
+      - "${RMQ_MGMT_PORT:-15672}:15672"   # management UI + HTTP API
+      - "${RMQ_STREAM_PORT:-5552}:5552"   # stream protocol (rstream)
+      - "${RMQ_PROM_PORT:-15692}:15692"   # Prometheus metrics
+    environment:
+      # Streams advertise host:port to clients; must be reachable from the host, not the container name.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: >-
+        -rabbitmq_stream advertised_host "localhost" advertised_port ${RMQ_STREAM_PORT:-5552}
+    volumes:
+      - ../../internal-pocs/event-processing-poc/rabbitmq/docker/conf/rabbitmq.conf:/etc/rabbitmq/conf.d/10-lab.conf:ro
+      - ../../internal-pocs/event-processing-poc/rabbitmq/docker/conf/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    container_name: flight-dynamodb
+    restart: unless-stopped
+    ports:
+      - "55105:8000"
+    # -sharedDb: one shared table namespace; -dbPath: persist to the mounted volume
+    command: [ "-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data" ]
+    working_dir: /home/dynamodblocal
+    volumes:
+      - pg_data:/home/dynamodblocal/data
+
+  dynamodb-ui:
+    image: aaronshaf/dynamodb-admin:latest
+    container_name: flight-dynamodb-ui
+    restart: unless-stopped
+    ports:
+      - "55106:8001"
+    environment:
+      DYNAMO_ENDPOINT: http://dynamodb:8000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    depends_on:
+      - dynamodb
+  # Flight app related services started with 552**
+  ams-api:
+    build:
+      context: airline-management-service
+    container_name: ams-api
+    restart: unless-stopped
+    ports:
+      - "55200:58100"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/flightdb
+      SPRING_DATASOURCE_USERNAME: learner
+      SPRING_DATASOURCE_PASSWORD: learner_pass
+      # Redis: service name + INTERNAL port (not localhost:55103, which is the host-published port
+      # and unreachable from inside this container).
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: redis123
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started   # redis service has no healthcheck defined; start-order only
+    # `docker compose up` never rebuilds an existing image on its own — it only builds
+    # when the image doesn't exist yet. Either pass `--build` on every `up`, or run
+    # `docker compose watch` (Compose v2.22+), which uses this block to rebuild
+    # automatically whenever these paths change. `action: rebuild` (not `sync`) because
+    # this is a compiled jar — the change must go through the Maven build, not a live copy.
+    develop:
+      watch:
+        - action: rebuild
+          path: ./airline-management-service/src
+        - action: rebuild
+          path: ./airline-management-service/pom.xml
+
+volumes:
+  redis-data:
+  pg_data:
+  pg_replica_data:
+  rabbitmq-data:
+  localstack_data:
+  pgadmin_data:
